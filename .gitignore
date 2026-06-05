@@ -1,0 +1,15 @@
+# Environment variables - never push secrets
+.env
+
+# Python cache files - auto-generated, not needed in repo
+__pycache__/
+*.pyc
+
+# Virtual environment folder - too large to push
+venv/
+
+# Uploaded files - temporary, not needed in repo
+uploads/
+
+# Mac system file - created automatically by Mac
+.DS_Store
