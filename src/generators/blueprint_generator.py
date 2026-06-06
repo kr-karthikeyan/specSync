@@ -1,69 +1,120 @@
 import json
-from langchain_openai import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
+from src.utils.models import Blueprint, APIContract, DatabaseSchema, ComponentTree
+from src.utils.prompt_builder import (
+    build_api_prompt,
+    build_schema_prompt,
+    build_component_prompt,
+    build_flow_prompt
+)
 
-from src.utils.models import Blueprint
-from src.utils.prompt_builder import build_blueprint_prompt
 
-
-def generate_blueprint(prd_text: str, api_key: str) -> Blueprint:
+def get_llm(provider: str, api_key: str):
     """
-    The core function of SpecSync.
-    Takes raw PRD text, sends it to OpenAI via LangChain,
-    and returns a structured Blueprint object.
+    Returns the appropriate LLM based on provider choice.
+    Separated into its own function so it's reusable.
     
-    prd_text: extracted text from the uploaded PRD
-    api_key: OpenAI API key from .env
-    returns: a validated Blueprint object
+    provider: "openai" or "groq"
+    api_key: the API key for the chosen provider
     """
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+        return ChatGroq(
+            # 70b is more reliable for structured JSON than 8b
+            model="llama-3.3-70b-versatile",
+            temperature=0,
+            api_key=api_key,
+            # Each small call needs max 1500 tokens — well within limit
+            max_tokens=1500
+        )
+    else:
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0,
+            api_key=api_key,
+            max_tokens=2000
+        )
 
-    # Initialize the OpenAI model via LangChain
-    # ChatOpenAI is LangChain's wrapper around OpenAI's chat models
-    # temperature=0 means deterministic output — no randomness
-    # we want consistent, structured JSON not creative responses
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",   # fast and cheap — perfect for structured output
-        temperature=0,          # 0 = focused, 1 = creative
-        api_key=api_key         # your key from .env
-    )
 
-    # Build the prompt using our prompt builder
-    prompt = build_blueprint_prompt(prd_text)
-
-    # Create a HumanMessage — LangChain wraps prompts in message objects
-    # This mimics a conversation where the user sends a message
+def call_llm(llm, prompt: str) -> dict:
+    """
+    Makes one AI call and returns parsed JSON dict.
+    Handles cleaning and parsing in one place.
+    
+    llm: the language model instance
+    prompt: the prompt string to send
+    returns: parsed Python dictionary
+    """
     messages = [
-        SystemMessage(content="You are a senior software architect who returns only valid JSON."),
+        SystemMessage(content="You are a senior software architect. Return only valid compact JSON. No explanation. No markdown."),
         HumanMessage(content=prompt)
     ]
 
-    # Send the messages to OpenAI and wait for response
-    # This is the actual API call — costs a tiny amount of API credits
+    # Make the API call
     response = llm.invoke(messages)
+    raw = response.content.strip()
 
-    # response.content is the raw text OpenAI returned
-    # We expect it to be a JSON string
-    raw_json = response.content
+    # Print for debugging — remove later
+    print(f"\n=== RAW RESPONSE ===\n{raw}\n=== END ===\n")
 
-    # Clean the response — sometimes OpenAI adds ```json at start
-    # even when we tell it not to. This handles that edge case.
-    # strip() removes whitespace from both ends
-    raw_json = raw_json.strip()
+    # Remove markdown code blocks if model added them
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        # Remove first line (```json) and last line (```)
+        raw = "\n".join(lines[1:-1])
 
-    # If it starts with a code block marker, remove it
-    if raw_json.startswith("```"):
-        # splitlines() splits by newline
-        # [1:-1] removes first and last lines (the ``` markers)
-        # join() combines lines back into one string
-        raw_json = "\n".join(raw_json.splitlines()[1:-1])
+    # Parse JSON
+    return json.loads(raw)
 
-    # Parse the JSON string into a Python dictionary
-    # json.loads() converts a JSON string → Python dict
-    blueprint_dict = json.loads(raw_json)
 
-    # Validate and convert the dict into our Blueprint Pydantic model
-    # model_validate() checks every field matches our defined structure
-    # If anything is wrong, Pydantic raises a clear error
-    blueprint = Blueprint.model_validate(blueprint_dict)
+def generate_blueprint(prd_text: str, api_key: str, provider: str = "openai") -> Blueprint:
+    """
+    Generates a complete blueprint using 3 separate focused AI calls.
+    Smaller calls = no truncation = reliable JSON every time.
+    
+    prd_text: extracted text from PRD
+    api_key: API key for chosen provider
+    provider: "openai" or "groq"
+    returns: validated Blueprint object
+    """
 
-    return blueprint
+    # Get the language model
+    llm = get_llm(provider, api_key)
+
+    # ---- Call 1: API Contract ----
+    # Small focused call — only asks for endpoints
+    api_dict = call_llm(llm, build_api_prompt(prd_text))
+    api_contract = APIContract(**api_dict)
+
+    # ---- Call 2: Database Schema ----
+    # Small focused call — only asks for tables
+    schema_dict = call_llm(llm, build_schema_prompt(prd_text))
+    database_schema = DatabaseSchema(**schema_dict)
+
+    # ---- Call 3: Component Tree ----
+    # Small focused call — only asks for components
+    component_dict = call_llm(llm, build_component_prompt(prd_text))
+    component_tree = ComponentTree(**component_dict)
+
+    # ---- Call 4: User Flow ----
+    # Returns a plain string not JSON — smallest call of all
+    messages = [
+        SystemMessage(content="You are a software architect. Return only a valid Mermaid.js diagram string. No explanation."),
+        HumanMessage(content=build_flow_prompt(prd_text))
+    ]
+    flow_response = llm.invoke(messages)
+    user_flow = flow_response.content.strip()
+
+    # Remove markdown if present
+    if user_flow.startswith("```"):
+        lines = user_flow.splitlines()
+        user_flow = "\n".join(lines[1:-1])
+
+    # Combine all 4 outputs into one Blueprint
+    return Blueprint(
+        api_contract=api_contract,
+        database_schema=database_schema,
+        component_tree=component_tree,
+        user_flow_diagram=user_flow
+    )
