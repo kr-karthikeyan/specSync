@@ -8,6 +8,7 @@ from src.parsers.pdf_parser import extract_text_from_pdf
 from src.parsers.docx_parser import extract_text_from_docx
 from src.parsers.text_parser import extract_text_from_txt
 from src.generators.blueprint_generator import generate_blueprint
+import streamlit.components.v1 as components
 
 
 # Load environment variables from .env file
@@ -201,13 +202,31 @@ if st.button("⚡ Generate Blueprint", type="primary"):
                 st.write(f"**Props:** {', '.join(component.props) if component.props else 'None'}")
                 st.write(f"**Children:** {', '.join(component.children) if component.children else 'None'}")
         
+
         # ---- User Flow Diagram Section ----
         st.markdown("<br>", unsafe_allow_html=True)
         st.subheader("🔀 User Flow Diagram")
-        
-        # Display the raw Mermaid diagram code
-        # We'll render it visually in a later version
-        st.code(blueprint.user_flow_diagram, language="mermaid")
+
+        # Build HTML that loads Mermaid.js and renders our diagram
+        # We embed the diagram string directly into the HTML
+        mermaid_html = f"""
+        <div class="mermaid">
+        {blueprint.user_flow_diagram}
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+        <script>
+            mermaid.initialize({{ startOnLoad: true, theme: 'default' }});
+        </script>
+        """
+
+        # Render the HTML inside Streamlit
+        # height controls the box size — adjust if diagram looks cut off
+        components.html(mermaid_html, height=400, scrolling=True)
+
+        # Keep the raw code visible too — useful for copying into docs
+        with st.expander("View raw Mermaid code"):
+            st.code(blueprint.user_flow_diagram, language="mermaid")
         
         # ---- Export Section ----
         st.markdown("<br>", unsafe_allow_html=True)
